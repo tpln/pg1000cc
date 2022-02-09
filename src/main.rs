@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::error::Error;
 use std::io::{stdin, stdout, Write};
+use midir::os::unix::VirtualOutput;
 
 #[derive(Debug, Clone)]
 struct ControlMessage {
@@ -22,9 +23,9 @@ impl ControlMessage {
 
     fn to_bytes(&self) -> Vec<u8> {
         let mut ret = vec![];
-        let status: u8 = 0xb | (self.channel & 0b00001111);
-        let data1 = self.cc | 0b01111111;
-        let data2 = self.value | 0b01111111;
+        let status: u8 = 0xb0 | (self.channel & 0b00001111);
+        let data1 = self.cc & 0b01111111;
+        let data2 = self.value & 0b01111111;
         ret.push(status);
         ret.push(data1);
         ret.push(data2);
@@ -107,6 +108,7 @@ impl Mapper {
     }
 
     pub fn map(&mut self, message: &[u8]) {
+        println!("Received {:x?}", message);
         if let Some(sysex) = Pg1000SysExMessage::from_bytes(message).ok() {
             // To assign PG-1000 sliders to CC's, set discovery_mode to true,
             // run the program and move the sliders you want to use. Then paste
@@ -115,8 +117,9 @@ impl Mapper {
             if !discovery_mode {
                 if self.id_map.contains_key(&sysex.id) {
                     let cc = ControlMessage::new(*self.id_map.get(&sysex.id).unwrap(), sysex.value, self.channel);
-                    println!("Sending sysex({}, {}) as cc({}, {}) on channel {}", sysex.id, sysex.value, cc.cc, cc.value, cc.channel);
-                    self.port.send(&cc.to_bytes());
+                    println!("Sending sysex({:?}) as cc({:?}) on channel {}", sysex, cc, cc.channel);
+                    println!("bytes: {:x?}", cc.to_bytes());
+                    self.port.send(&cc.to_bytes()).unwrap();
                 }
             } else {
                 if !self.seen.contains(&sysex.id) {
@@ -128,6 +131,10 @@ impl Mapper {
                     );
                 }
             }
+        }
+        else {
+            // passthrough
+            self.port.send(message).unwrap();
         }
     }
 }
@@ -147,13 +154,14 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     let in_port = select_port(&midi_in, "input")?;
     println!();
-    let out_port = select_port(&midi_out, "output")?;
+    let conn_out = midi_out.create_virtual("pg1000cc")?;
+        //select_port(&midi_out, "output")?;
 
     println!("\nOpening connections");
     let in_port_name = midi_in.port_name(&in_port)?;
-    let out_port_name = midi_out.port_name(&out_port)?;
+    //let out_port_name = midi_out.port_name(&out_port)?;
 
-    let mut conn_out = midi_out.connect(&out_port, "midir-forward")?;
+    //let conn_out = midi_out.connect(&out_port, "midir-forward")?;
 
     let mut mapper = Mapper::new(1, conn_out);
 
@@ -163,34 +171,13 @@ fn run() -> Result<(), Box<dyn Error>> {
         "midir-forward",
         move |stamp, message, _| {
             mapper.map(message);
-            // conn_out
-            //     .send(message)
-            //     .unwrap_or_else(|_| println!("Error when forwarding message ..."));
-            if message.len() == 11 {
-                let control_id = message[7];
-                let value: i8 = message[8] as i8;
-                // println!(
-                //     "{}: control_id: {}, value: {}, (len = {})",
-                //     stamp,
-                //     control_id,
-                //     value,
-                //     message.len()
-                // );
-            } else if message.len() != 1 {
-                println!(
-                    "{}: message: {:?}, (len = {})",
-                    stamp,
-                    message,
-                    message.len()
-                );
-            }
         },
         (),
     )?;
 
     println!(
-        "Connections open, forwarding from '{}' to '{}' (press enter to exit) ...",
-        in_port_name, out_port_name
+        "Connections open, forwarding from '{}' to 'pg1000cc' (press enter to exit) ...",
+        in_port_name
     );
 
     let mut input = String::new();
