@@ -4,7 +4,6 @@ extern crate simple_error;
 use midir::{Ignore, MidiIO, MidiInput, MidiOutput,MidiOutputConnection};
 use simple_error::bail;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::error::Error;
 use std::io::{stdin, stdout, Write};
 use midir::os::unix::VirtualOutput;
@@ -22,6 +21,8 @@ impl ControlMessage {
     }
 
     fn to_bytes(&self) -> Vec<u8> {
+        // Besides the MIDI standard, here's a convenient page describing
+        // the protocol: https://www.songstuff.com/recording/article/midi_message_format/
         let mut ret = vec![];
         let status: u8 = 0xb0 | (self.channel & 0b00001111);
         let data1 = self.cc & 0b01111111;
@@ -55,27 +56,31 @@ impl Pg1000SysExMessage {
 }
 
 struct Mapper {
-    seen: HashSet<u8>,
-    id_map: HashMap<u8, u8>,
+    id_map: HashMap<u8, u8>, // key = sysex id, value = cc number
     channel: u8,
+    event_count: u64,
+    cc_event_count: u64,
     port:MidiOutputConnection
 }
 
 impl Mapper {
-    // undefined CC's:
-    // CC 3
-    // CC 9
-    // CC 14-15
-    // CC 20-31
-    // CC 85-90
-    // CC 102-119
-    const UndefinedControlMessages: &'static [u8] = &[
-        3, 9, 14, 15, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 85, 86, 87, 88, 89, 90, 102,
-        103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119,
-    ];
+    // undefined CC's from MIDI standard:
+    // const UNDEFINED_CONTROL_MESSAGES: &'static [u8] = &[
+    //     3, 9, 14, 15, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 85, 86, 87, 88, 89, 90, 102,
+    //     103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119,
+    // ];
 
     pub fn new(channel:u8, port:MidiOutputConnection) -> Self {
         let mut id_map = HashMap::new();
+
+        // These are all the sliders on the PG-1000, that have values ranging from 0-100.
+        // The rest of the sliders have considerably smaller resolution,
+        // ranging e.g. 0-4. Seems their original purpose is to act as
+        // switches. I don't have use for those, but if you do, you could add
+        // them here as well.
+        //
+        // The map values are the cc numbers, these specifically are unused
+        // values from the MIDI-standard.
         id_map.insert(25, 3);
         id_map.insert(24, 9);
         id_map.insert(33, 14);
@@ -101,41 +106,32 @@ impl Mapper {
 
         Self {
             id_map,
-            seen: HashSet::new(),
             channel,
-            port
+            port,
+            event_count: 0,
+            cc_event_count: 0
         }
     }
 
     pub fn map(&mut self, message: &[u8]) {
-        println!("Received {:x?}", message);
+        self.event_count = self.event_count.overflowing_add(1).0;
+
+        // If this is a Roland PG-1000 sysex message and we've got a
+        // mapping for it, then map...
         if let Some(sysex) = Pg1000SysExMessage::from_bytes(message).ok() {
-            // To assign PG-1000 sliders to CC's, set discovery_mode to true,
-            // run the program and move the sliders you want to use. Then paste
-            // the resulting code into new(), build and run.
-            let discovery_mode = false;
-            if !discovery_mode {
-                if self.id_map.contains_key(&sysex.id) {
-                    let cc = ControlMessage::new(*self.id_map.get(&sysex.id).unwrap(), sysex.value, self.channel);
-                    println!("Sending sysex({:?}) as cc({:?}) on channel {}", sysex, cc, cc.channel);
-                    println!("bytes: {:x?}", cc.to_bytes());
-                    self.port.send(&cc.to_bytes()).unwrap();
-                }
-            } else {
-                if !self.seen.contains(&sysex.id) {
-                    self.seen.insert(sysex.id);
-                    println!(
-                        "id_map.insert({}, {});",
-                        sysex.id,
-                        Self::UndefinedControlMessages[self.seen.len() - 1]
-                    );
-                }
+            if self.id_map.contains_key(&sysex.id) {
+                let cc = ControlMessage::new(*self.id_map.get(&sysex.id).unwrap(), (sysex.value as f64 * 1.27f64) as u8, self.channel);
+                //println!("Sending sysex({:?}) as cc({:?}) on channel {}", sysex, cc, cc.channel);
+                //println!("bytes: {:x?}", cc.to_bytes());
+                self.port.send(&cc.to_bytes()).unwrap();
+                self.cc_event_count = self.cc_event_count.overflowing_add(1).0;
             }
         }
         else {
-            // passthrough
+            // ...otherwise passthrough
             self.port.send(message).unwrap();
         }
+        //print!("\rTotal events: {}, CCs: {}, last input {:x?}", self.event_count, self.cc_event_count, message);
     }
 }
 
@@ -148,28 +144,24 @@ fn main() {
 
 #[cfg(not(target_arch = "wasm32"))] // conn_out is not `Send` in Web MIDI, which means it cannot be passed to connect
 fn run() -> Result<(), Box<dyn Error>> {
-    let mut midi_in = MidiInput::new("midir forwarding input")?;
+    let mut midi_in = MidiInput::new("pg1000cc forwarding input")?;
     midi_in.ignore(Ignore::None);
-    let midi_out = MidiOutput::new("midir forwarding output")?;
+    let midi_out = MidiOutput::new("pg1000cc forwarding output")?;
 
     let in_port = select_port(&midi_in, "input")?;
     println!();
     let conn_out = midi_out.create_virtual("pg1000cc")?;
-        //select_port(&midi_out, "output")?;
 
     println!("\nOpening connections");
     let in_port_name = midi_in.port_name(&in_port)?;
-    //let out_port_name = midi_out.port_name(&out_port)?;
-
-    //let conn_out = midi_out.connect(&out_port, "midir-forward")?;
 
     let mut mapper = Mapper::new(1, conn_out);
 
     // _conn_in needs to be a named parameter, because it needs to be kept alive until the end of the scope
     let _conn_in = midi_in.connect(
         &in_port,
-        "midir-forward",
-        move |stamp, message, _| {
+        "pg1000cc",
+        move |_, message, _| {
             mapper.map(message);
         },
         (),
@@ -205,6 +197,6 @@ fn select_port<T: MidiIO>(midi_io: &T, descr: &str) -> Result<T::Port, Box<dyn E
 
 #[cfg(target_arch = "wasm32")]
 fn run() -> Result<(), Box<dyn Error>> {
-    println!("test_forward cannot run on Web MIDI");
+    println!("pg1000cc cannot run on Web MIDI");
     Ok(())
 }
