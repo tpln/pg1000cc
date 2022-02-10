@@ -14,7 +14,7 @@ whole range). I didn't want to use those. Here is a photo showing my PG-1000. Th
 with the yellow tape are enabled and have a resolution of 100. The ones with orange tape
 are enabled and have a resolution of 50. The rest are disabled.
 
-![](pg1000.jpeg "Enabled sliders")
+![](pg1000.jpg "Enabled sliders")
 
 Output range of all sliders after the CC conversion is 'standard' 0-127.
 
