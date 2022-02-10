@@ -117,8 +117,6 @@ impl Pg1000SysExMessage {
 struct Mapper {
     sliders: HashMap<SysExId, Slider>,
     channel: u8,
-    event_count: u64,
-    cc_event_count: u64,
     port:MidiOutputConnection
 }
 
@@ -135,10 +133,14 @@ impl Mapper {
         // ranging e.g. 0-4. Seems their original purpose is to act as
         // switches. I don't have use for those, but if you do, you could add
         // them here as well.
+        //
+        // These assume patch edit mode (LOWER or UPPER led is lit under COMMON SELECT).
+        // Seems the sysex ids change when a partial has been selected. Probably could add
+        // mappings for them as well, but would run out of FREE_CCS...
+        
         let mut sliders = HashMap::new();
         let default_cc_range = MidiRange::new(0, 127);
         let default_sysex_range = MidiRange::new(0, 100);
-
         sliders.insert(0x0319, Slider::new(0x0319, Self::FREE_CCS[0], default_sysex_range.clone(), default_cc_range.clone()));
         sliders.insert(0x0318, Slider::new(0x0318, Self::FREE_CCS[1], default_sysex_range.clone(), default_cc_range.clone()));
         sliders.insert(0x0321, Slider::new(0x0321, Self::FREE_CCS[2], default_sysex_range.clone(), default_cc_range.clone()));
@@ -165,43 +167,29 @@ impl Mapper {
         sliders.insert(0x0114, Slider::new(0x0114, Self::FREE_CCS[22], default_sysex_range.clone(), default_cc_range.clone()));
         sliders.insert(0x0115, Slider::new(0x0115, Self::FREE_CCS[23], default_sysex_range.clone(), default_cc_range.clone()));
 
-        // T1 - T4
-        sliders.insert(0x010D, Slider::new(0x010D, Self::FREE_CCS[24], MidiRange::new(0, 0x32), default_cc_range.clone()));
-        sliders.insert(0x010E, Slider::new(0x010E, Self::FREE_CCS[25], MidiRange::new(0, 0x32), default_cc_range.clone()));
-        sliders.insert(0x010F, Slider::new(0x010F, Self::FREE_CCS[26], MidiRange::new(0, 0x32), default_cc_range.clone()));
-        sliders.insert(0x0110, Slider::new(0x0110, Self::FREE_CCS[27], MidiRange::new(0, 0x32), default_cc_range.clone()));
-
-
-        
+        // T1 - T4 have a range of 0-50, use those as well.
+        sliders.insert(0x010D, Slider::new(0x010D, Self::FREE_CCS[24], MidiRange::new(0, 50), default_cc_range.clone()));
+        sliders.insert(0x010E, Slider::new(0x010E, Self::FREE_CCS[25], MidiRange::new(0, 50), default_cc_range.clone()));
+        sliders.insert(0x010F, Slider::new(0x010F, Self::FREE_CCS[26], MidiRange::new(0, 50), default_cc_range.clone()));
+        sliders.insert(0x0110, Slider::new(0x0110, Self::FREE_CCS[27], MidiRange::new(0, 50), default_cc_range.clone()));
 
         Self {
             sliders,
             channel,
             port,
-            event_count: 0,
-            cc_event_count: 0
         }
     }
 
     pub fn map(&mut self, message: &[u8]) {
-        self.event_count = self.event_count.overflowing_add(1).0;
-
         // If this is a Roland PG-1000 sysex message and we've got a
         // mapping for it, then map...
-        if let Some(sysex) = Pg1000SysExMessage::from_bytes(message).ok() {
+        Pg1000SysExMessage::from_bytes(message).ok().map(|sysex| {
             self.sliders.get(&sysex.id).map(|slider| {
                 let cc = ControlMessage::new(slider.cc_id, slider.sysex_value_as_cc_value(sysex.value), self.channel);
                 self.port.send(&cc.to_bytes()).unwrap();
-                self.cc_event_count = self.cc_event_count.overflowing_add(1).0;
-                println!("Sending sysex({:?}) as cc({:?}) on channel {}", sysex, cc, cc.channel);
-                println!("bytes: {:x?}", cc.to_bytes());
+                println!("{:X?}", cc.to_bytes());
             });
-        }
-        else {
-            // ...otherwise passthrough
-            self.port.send(message).unwrap();
-        }
-        //print!("\rTotal events: {}, CCs: {}, last input {:x?}", self.event_count, self.cc_event_count, message);
+        });
     }
 }
 
@@ -250,12 +238,14 @@ fn run() -> Result<(), Box<dyn Error>> {
 }
 
 fn select_port<T: MidiIO>(midi_io: &T, descr: &str) -> Result<T::Port, Box<dyn Error>> {
+    println!("This program allows the use of a Roland PG-1000 as a MIDI controller sending CC messages.\n");
+    println!("NOTE: To work, set the PG-1000 in patch edit mode by pressing LOWER or UPPER button.\n");
     println!("Available {} ports:", descr);
     let midi_ports = midi_io.ports();
     for (i, p) in midi_ports.iter().enumerate() {
         println!("{}: {}", i, midi_io.port_name(p)?);
     }
-    print!("Please select {} port: ", descr);
+    print!("Please select {} port where PG-1000 is connected: ", descr);
     stdout().flush()?;
     let mut input = String::new();
     stdin().read_line(&mut input)?;
